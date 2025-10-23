@@ -1,7 +1,7 @@
 // industrial-iot-machine-monitoring-control-system/backend/server.js
 const express = require('express');
 const http = require('http');
-const { MongoClient } = require('mongodb');
+const { MongoClient, ObjectId } = require('mongodb');
 const mqtt = require('mqtt');
 const { Server } = require('socket.io');
 const cors = require('cors');
@@ -186,6 +186,11 @@ class MachineController {
 
   // Manual control with safety checks
   async manualControl(machineId, plantId, command, operator, userRole) {
+    // Add validation for userRole
+    if (!userRole) {
+      throw new Error('User role is required for machine control');
+    }
+
     const currentState = this.machineStates.get(machineId);
     
     // Role-based access control for commands
@@ -259,6 +264,9 @@ const authenticate = (req, res, next) => {
 // Role-based authorization middleware
 function authorize(roles = []) {
   return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
     if (!roles.includes(req.user.role)) {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
@@ -302,6 +310,20 @@ async function start() {
       created: new Date()
     });
     console.log('Default admin user created: admin / admin123');
+  }
+
+  // Initialize default operator user if not exists
+  const operatorExists = await usersCol.findOne({ username: 'operator' });
+  if (!operatorExists) {
+    const hashedPassword = await bcrypt.hash('operator123', 10);
+    await usersCol.insertOne({
+      username: 'operator',
+      password: hashedPassword,
+      role: 'operator',
+      name: 'Factory Operator',
+      created: new Date()
+    });
+    console.log('Default operator user created: operator / operator123');
   }
 
   // Initialize default machines if not exists
@@ -448,7 +470,7 @@ async function start() {
 
       const token = jwt.sign(
         { 
-          userId: user._id, 
+          userId: user._id.toString(), 
           username: user.username, 
           role: user.role,
           name: user.name 
@@ -502,53 +524,98 @@ async function start() {
     }
   });
 
-  // Protected REST endpoints
-  app.get('/api/machines', async (req, res) => {
-    const machines = await machinesCol.find().toArray();
-    res.json(machines);
+  // Public health check endpoint
+  app.get('/health', (req, res) => {
+    res.json({ status: 'OK', timestamp: new Date().toISOString() });
   });
 
-  app.post('/api/machines', authorize(['admin']), async (req, res) => {
-    const doc = req.body;
-    await machinesCol.insertOne(doc);
-    res.json({ ok: true });
+  // Protected REST endpoints - ALL require authentication
+  app.get('/api/machines', authenticate, async (req, res) => {
+    try {
+      const machines = await machinesCol.find().toArray();
+      res.json(machines);
+    } catch (error) {
+      console.error('Error fetching machines:', error);
+      res.status(500).json({ error: 'Failed to fetch machines' });
+    }
   });
 
-  app.get('/api/machines/:id/telemetry', async (req, res) => {
-    const { id } = req.params;
-    const limit = parseInt(req.query.limit || '200', 10);
-    const data = await telemetryCol.find({ machineId: id }).sort({ ts: -1 }).limit(limit).toArray();
-    res.json(data);
+  app.post('/api/machines', authenticate, authorize(['admin']), async (req, res) => {
+    try {
+      const doc = req.body;
+      await machinesCol.insertOne(doc);
+      res.json({ ok: true });
+    } catch (error) {
+      console.error('Error creating machine:', error);
+      res.status(500).json({ error: 'Failed to create machine' });
+    }
   });
 
-  app.get('/api/alerts', async (req, res) => {
-    const data = await alertsCol.find().sort({ ts: -1 }).limit(200).toArray();
-    res.json(data);
+  app.get('/api/machines/:id/telemetry', authenticate, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const limit = parseInt(req.query.limit || '200', 10);
+      const data = await telemetryCol.find({ machineId: id }).sort({ ts: -1 }).limit(limit).toArray();
+      res.json(data);
+    } catch (error) {
+      console.error('Error fetching telemetry:', error);
+      res.status(500).json({ error: 'Failed to fetch telemetry' });
+    }
+  });
+
+  app.get('/api/alerts', authenticate, async (req, res) => {
+    try {
+      const data = await alertsCol.find().sort({ ts: -1 }).limit(200).toArray();
+      res.json(data);
+    } catch (error) {
+      console.error('Error fetching alerts:', error);
+      res.status(500).json({ error: 'Failed to fetch alerts' });
+    }
   });
 
   // Enhanced machine state endpoints
-  app.get('/api/machines/:id/state', async (req, res) => {
-    const { id } = req.params;
-    const state = machineController.getMachineState(id);
-    res.json(state);
+  app.get('/api/machines/:id/state', authenticate, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const state = machineController.getMachineState(id);
+      res.json(state);
+    } catch (error) {
+      console.error('Error fetching machine state:', error);
+      res.status(500).json({ error: 'Failed to fetch machine state' });
+    }
   });
 
-  app.get('/api/machines/:id/conditions', async (req, res) => {
-    const { id } = req.params;
-    const limit = parseInt(req.query.limit || '50', 10);
-    const data = await db.collection('machine_conditions')
-      .find({ machineId: id })
-      .sort({ timestamp: -1 })
-      .limit(limit)
-      .toArray();
-    res.json(data);
+  app.get('/api/machines/:id/conditions', authenticate, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const limit = parseInt(req.query.limit || '50', 10);
+      const data = await db.collection('machine_conditions')
+        .find({ machineId: id })
+        .sort({ timestamp: -1 })
+        .limit(limit)
+        .toArray();
+      res.json(data);
+    } catch (error) {
+      console.error('Error fetching conditions:', error);
+      res.status(500).json({ error: 'Failed to fetch conditions' });
+    }
   });
 
-  app.post('/api/machines/:id/commands', async (req, res) => {
+  // FIXED: Added authenticate middleware to commands endpoint
+  app.post('/api/machines/:id/commands', authenticate, async (req, res) => {
     const { id } = req.params;
     const { cmd, params = {}, issuedBy = 'operator' } = req.body;
     
     try {
+      console.log('User in command request:', req.user);
+      
+      if (!req.user || !req.user.role) {
+        return res.status(401).json({ 
+          ok: false, 
+          error: 'User authentication missing or invalid' 
+        });
+      }
+
       const result = await machineController.manualControl(
         id, 
         PLANT_ID, 
@@ -558,22 +625,36 @@ async function start() {
       );
       res.json({ ok: true, ...result });
     } catch (error) {
+      console.error('Command error:', error);
       res.status(400).json({ ok: false, error: error.message });
     }
   });
 
   // User management endpoints (admin only)
-  app.get('/api/users', authorize(['admin']), async (req, res) => {
-    const users = await usersCol.find({}, { projection: { password: 0 } }).toArray();
-    res.json(users);
+  app.get('/api/users', authenticate, authorize(['admin']), async (req, res) => {
+    try {
+      const users = await usersCol.find({}, { projection: { password: 0 } }).toArray();
+      res.json(users);
+    } catch (error) {
+      console.error('Error fetching users:', error);
+      res.status(500).json({ error: 'Failed to fetch users' });
+    }
   });
 
-  app.get('/api/profile', async (req, res) => {
-    const user = await usersCol.findOne(
-      { username: req.user.username }, 
-      { projection: { password: 0 } }
-    );
-    res.json(user);
+  app.get('/api/profile', authenticate, async (req, res) => {
+    try {
+      const user = await usersCol.findOne(
+        { username: req.user.username }, 
+        { projection: { password: 0 } }
+      );
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+      res.json(user);
+    } catch (error) {
+      console.error('Error fetching profile:', error);
+      res.status(500).json({ error: 'Failed to fetch profile' });
+    }
   });
 
   // Socket.IO authentication middleware
@@ -604,6 +685,7 @@ async function start() {
     console.log(`Backend listening on ${PORT}`);
     console.log(`Plant ID: ${PLANT_ID}`);
     console.log(`Default admin: admin / admin123`);
+    console.log(`Default operator: operator / operator123`);
   });
 }
 
