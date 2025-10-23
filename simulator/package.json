@@ -1,7 +1,14 @@
 {
-  "name": "iiot-simulator",
-  "version": "1.0.0",
-  "main": "sim.js",
-  "scripts": { "start":"node sim.js" },
-  "dependencies": { "mqtt":"^4.3.7", "dotenv":"^16.0.0" }
+  "name": "iiot-smart-factory-simulator",
+  "version": "2.0.0",
+  "description": "Enhanced Smart Factory Simulation",
+  "main": "enhanced-sim.js",
+  "scripts": { 
+    "start": "node enhanced-sim.js",
+    "dev": "node enhanced-sim.js"
+  },
+  "dependencies": { 
+    "mqtt": "^4.3.7", 
+    "dotenv": "^16.0.0" 
+  }
 }

@@ -1,3 +1,4 @@
+// industrial-iot-machine-monitoring-control-system/frontend/src/components/Login.jsx
 import React, { useState } from "react";
 
 export default function Login({ backend, onLogin }) {
@@ -51,7 +52,7 @@ export default function Login({ backend, onLogin }) {
         maxWidth: '400px'
       }}>
         <h2 style={{ textAlign: 'center', marginBottom: '30px', color: '#2c3e50' }}>
-          IIoT Factory Login
+          🏭 Smart Factory Login
         </h2>
         
         {error && (
@@ -147,7 +148,10 @@ export default function Login({ backend, onLogin }) {
         }}>
           <strong>Default Credentials:</strong><br />
           Username: <code>admin</code><br />
-          Password: <code>admin123</code>
+          Password: <code>admin123</code><br />
+          <br />
+          Username: <code>operator</code><br />
+          Password: <code>operator123</code>
         </div>
       </form>
     </div>

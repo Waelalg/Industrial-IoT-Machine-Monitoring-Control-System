@@ -17,9 +17,7 @@ services:
       - mongodata:/data/db
 
   backend:
-    build: 
-      context: ./backend
-      dockerfile: Dockerfile
+    build: ./backend
     ports:
       - "3000:3000"
     environment:
@@ -52,6 +50,7 @@ services:
       - PLANT_ID=A1
     depends_on:
       - mosquitto
+    command: "npm start"
 
 volumes:
   mosqdata:

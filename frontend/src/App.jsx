@@ -1,26 +1,21 @@
-//industrial-iot-machine-monitoring-control-system/frontend/src/App.jsx
+// industrial-iot-machine-monitoring-control-system/frontend/src/App.jsx
 import React, { useEffect, useState } from "react";
 import io from "socket.io-client";
-import MachineList from "./components/MachineList";
+import SmartFactoryDashboard from "./components/SmartFactoryDashboard";
 import MachineDetail from "./components/MachineDetail";
 import Login from "./components/Login";
 
-// Use environment variable with fallback
 const backend = import.meta.env.VITE_BACKEND || "http://localhost:3000";
-
-// Debug: log the backend URL
-console.log("Backend URL:", backend);
 
 export default function App() {
   const [machines, setMachines] = useState([]);
-  const [selected, setSelected] = useState(null);
+  const [selectedMachine, setSelectedMachine] = useState(null);
   const [telemetry, setTelemetry] = useState({});
   const [alerts, setAlerts] = useState([]);
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [socket, setSocket] = useState(null);
 
-  // Check if user is logged in on component mount
   useEffect(() => {
     const token = localStorage.getItem('token');
     const userData = localStorage.getItem('user');
@@ -35,28 +30,69 @@ export default function App() {
 
   const initializeSocket = (token) => {
     const newSocket = io(backend, {
-      auth: {
-        token: token
-      }
+      auth: { token }
     });
 
     newSocket.on("connect", () => {
-      console.log("Socket.IO connected");
+      console.log("✅ Smart Factory Dashboard Connected");
       setLoading(false);
       fetchMachines(token);
     });
 
-    newSocket.on("telemetry", (d) => {
-      setTelemetry(prev => ({ ...prev, [d.machineId]: d }));
+    // Handle telemetry data
+    newSocket.on("telemetry", (data) => {
+      console.log("📊 Telemetry received:", data.machineId, data);
+      setTelemetry(prev => ({ 
+        ...prev, 
+        [data.machineId]: data
+      }));
     });
 
-    newSocket.on("alert", (a) => setAlerts(prev => [a, ...prev]));
-    newSocket.on("status", (s) => console.log('status', s));
-    newSocket.on("machine_evaluation", (e) => console.log('evaluation', e));
-    newSocket.on("commandAck", (a) => console.log('commandAck', a));
+    // Handle machine state updates
+    newSocket.on("machine_state_update", (update) => {
+      console.log("🔄 Machine state update:", update);
+      // Update the machine status in the machines list
+      setMachines(prev => prev.map(machine => 
+        machine.machineId === update.machineId 
+          ? { ...machine, status: update.state }
+          : machine
+      ));
+    });
+
+    // Handle initial states
+    newSocket.on("initial_states", (states) => {
+      console.log("🏭 Initial machine states:", states);
+      // Update telemetry with current states
+      Object.keys(states).forEach(machineId => {
+        setTelemetry(prev => ({
+          ...prev,
+          [machineId]: {
+            ...prev[machineId],
+            state: states[machineId].currentState
+          }
+        }));
+      });
+    });
+
+    newSocket.on("alert", (alert) => {
+      console.log("🚨 Alert received:", alert);
+      setAlerts(prev => [alert, ...prev.slice(0, 49)]); // Keep last 50 alerts
+    });
+
+    newSocket.on("machine_evaluation", (evaluation) => {
+      console.log('📈 Machine evaluation:', evaluation);
+    });
+
+    newSocket.on("commandAck", (ack) => {
+      console.log('✅ Command acknowledged:', ack);
+    });
+
+    newSocket.on("status", (status) => {
+      console.log('📢 Status update:', status);
+    });
 
     newSocket.on("connect_error", (err) => {
-      console.error("Socket connection error:", err);
+      console.error("❌ Socket connection error:", err);
       setLoading(false);
       if (err.message.includes("Authentication error")) {
         handleLogout();
@@ -64,34 +100,35 @@ export default function App() {
     });
 
     setSocket(newSocket);
+
+    // Request notification permission
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
   };
 
   const fetchMachines = async (token) => {
     try {
-      console.log("Fetching machines from:", `${backend}/api/machines`);
+      console.log("🔄 Fetching machines...");
       const response = await fetch(`${backend}/api/machines`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
+        headers: { 'Authorization': `Bearer ${token}` }
       });
       
-      if (!response.ok) {
-        if (response.status === 401) {
-          handleLogout();
-          return;
-        }
-        throw new Error(`HTTP error! status: ${response.status}`);
+      if (response.ok) {
+        const data = await response.json();
+        console.log("✅ Machines loaded:", data);
+        setMachines(data);
+      } else {
+        console.error("❌ Failed to fetch machines:", response.status);
       }
-      
-      const data = await response.json();
-      setMachines(data);
     } catch (error) {
-      console.error('Failed to fetch machines:', error);
+      console.error('❌ Failed to fetch machines:', error);
       setMachines([]);
     }
   };
 
   const handleLogin = (userData, token) => {
+    console.log("🔑 User logged in:", userData.username);
     localStorage.setItem('token', token);
     localStorage.setItem('user', JSON.stringify(userData));
     setUser(userData);
@@ -99,6 +136,7 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    console.log("🚪 User logging out");
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     setUser(null);
@@ -112,7 +150,25 @@ export default function App() {
   };
 
   if (loading) {
-    return <div style={{ padding: 20 }}>Loading...</div>;
+    return (
+      <div style={{ 
+        display: 'flex', 
+        justifyContent: 'center', 
+        alignItems: 'center', 
+        height: '100vh',
+        background: '#2c3e50',
+        color: 'white',
+        fontSize: '1.2em'
+      }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: '3em', marginBottom: '20px' }}>🏭</div>
+          <div>Loading Smart Factory Dashboard...</div>
+          <div style={{ fontSize: '0.8em', marginTop: '10px', opacity: 0.7 }}>
+            Connecting to backend...
+          </div>
+        </div>
+      </div>
+    );
   }
 
   if (!user) {
@@ -125,23 +181,39 @@ export default function App() {
       <div style={{ 
         background: '#2c3e50', 
         color: 'white', 
-        padding: '10px 20px',
+        padding: '15px 20px',
         display: 'flex',
         justifyContent: 'space-between',
-        alignItems: 'center'
+        alignItems: 'center',
+        boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
       }}>
-        <h2 style={{ margin: 0 }}>IIoT Factory Dashboard</h2>
         <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
-          <span>Welcome, {user.name} ({user.role})</span>
+          <h1 style={{ margin: 0, fontSize: '1.5em' }}>🏭 Smart Factory 4.0</h1>
+          <div style={{ 
+            background: '#34495e', 
+            padding: '4px 8px', 
+            borderRadius: '4px',
+            fontSize: '0.9em'
+          }}>
+            Plant: A1
+          </div>
+        </div>
+        
+        <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: '0.9em', opacity: 0.8 }}>Welcome back,</div>
+            <div style={{ fontWeight: 'bold' }}>{user.name} ({user.role})</div>
+          </div>
           <button 
             onClick={handleLogout}
             style={{
               background: '#e74c3c',
               color: 'white',
               border: 'none',
-              padding: '5px 10px',
-              borderRadius: '3px',
-              cursor: 'pointer'
+              padding: '8px 16px',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontWeight: 'bold'
             }}
           >
             Logout
@@ -149,61 +221,51 @@ export default function App() {
         </div>
       </div>
 
+      {/* Alert Banner */}
+      {alerts.length > 0 && alerts[0].type === 'CRITICAL' && (
+        <div style={{
+          background: '#ffebee',
+          color: '#c62828',
+          padding: '10px 20px',
+          borderBottom: '2px solid #f44336',
+          fontWeight: 'bold',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px'
+        }}>
+          <span>🚨</span>
+          <span>CRITICAL ALERT: {alerts[0].machineId} - {alerts[0].message}</span>
+        </div>
+      )}
+
       {/* Main Content */}
-      <div style={{ display: 'flex', flex: 1, gap: 20, padding: 20 }}>
-        <div style={{ width: 300 }}>
-          <h3>Machines</h3>
-          <MachineList 
-            machines={machines} 
-            telemetry={telemetry} 
-            onSelect={setSelected}
+      <div style={{ flex: 1, background: '#ecf0f1' }}>
+        {selectedMachine ? (
+          <MachineDetail 
+            machine={selectedMachine} 
+            telemetry={telemetry[selectedMachine]} 
+            backend={backend} 
             token={localStorage.getItem('token')}
-            backend={backend}
+            onBack={() => setSelectedMachine(null)}
           />
-          
-          <h4>Alerts</h4>
-          <div style={{ maxHeight: 200, overflow: 'auto' }}>
-            {alerts.length > 0 ? (
-              <ul style={{ padding: 0, margin: 0, listStyle: 'none' }}>
-                {alerts.map((a, i) => (
-                  <li 
-                    key={i} 
-                    style={{ 
-                      padding: '8px', 
-                      borderBottom: '1px solid #eee',
-                      background: a.type === 'CRITICAL' ? '#ffebee' : '#fff3e0'
-                    }}
-                  >
-                    <strong>{a.machineId}</strong> - {a.type} - {a.value}
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p>No alerts</p>
-            )}
-          </div>
-        </div>
-        
-        <div style={{ flex: 1 }}>
-          {selected ? (
-            <MachineDetail 
-              machine={selected} 
-              telemetry={telemetry[selected]} 
-              backend={backend} 
-              token={localStorage.getItem('token')}
-            />
-          ) : (
-            <div style={{ 
-              display: 'flex', 
-              justifyContent: 'center', 
-              alignItems: 'center', 
-              height: '100%',
-              color: '#666'
-            }}>
-              Select a machine to view details
-            </div>
-          )}
-        </div>
+        ) : (
+          <SmartFactoryDashboard 
+            machines={machines}
+            telemetry={telemetry}
+            onSelectMachine={setSelectedMachine}
+          />
+        )}
+      </div>
+
+      {/* Footer */}
+      <div style={{ 
+        background: '#34495e', 
+        color: '#bdc3c7', 
+        padding: '10px 20px',
+        textAlign: 'center',
+        fontSize: '0.9em'
+      }}>
+        Smart Factory Monitoring System • {new Date().getFullYear()} • Real-time IIoT Platform
       </div>
     </div>
   );

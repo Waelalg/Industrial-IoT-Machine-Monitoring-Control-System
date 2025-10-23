@@ -1,3 +1,4 @@
+// industrial-iot-machine-monitoring-control-system/frontend/src/components/MachineControl.jsx
 import React, { useState } from "react";
 
 export default function MachineControl({ machineId, backend, currentState, token }) {
@@ -5,12 +6,13 @@ export default function MachineControl({ machineId, backend, currentState, token
 
   const sendCommand = async (cmd) => {
     if (!token) {
-      alert('Authentication required');
+      alert('Authentication required. Please log in again.');
       return;
     }
 
     setLoading(true);
     try {
+      console.log(`Sending command ${cmd} to ${machineId}`);
       const res = await fetch(`${backend}/api/machines/${machineId}/commands`, {
         method: 'POST',
         headers: {
@@ -27,12 +29,13 @@ export default function MachineControl({ machineId, backend, currentState, token
       const result = await res.json();
       
       if (result.ok) {
-        alert(`Command ${cmd} sent successfully! Request ID: ${result.reqId}`);
+        alert(`✅ Command ${cmd} sent successfully! Request ID: ${result.reqId}`);
       } else {
-        alert(`Error: ${result.error}`);
+        alert(`❌ Error: ${result.error}`);
       }
     } catch (error) {
-      alert('Failed to send command: ' + error.message);
+      console.error('Command failed:', error);
+      alert('❌ Failed to send command: ' + error.message);
     } finally {
       setLoading(false);
     }
@@ -44,13 +47,14 @@ export default function MachineControl({ machineId, backend, currentState, token
       idle: '#FFC107',
       stopped: '#F44336',
       maintenance: '#FF9800',
-      error: '#9C27B0'
+      error: '#9C27B0',
+      emergency_stop: '#D32F2F'
     };
     return colors[state] || '#757575';
   };
 
   return (
-    <div style={{ marginTop: 12, padding: 16, border: '1px solid #ddd', borderRadius: 8 }}>
+    <div style={{ marginTop: 12, padding: 16, border: '1px solid #ddd', borderRadius: 8, background: 'white' }}>
       <h4>Machine Control</h4>
       
       <div style={{ marginBottom: 12 }}>

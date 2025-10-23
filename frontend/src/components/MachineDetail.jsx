@@ -1,7 +1,8 @@
+// industrial-iot-machine-monitoring-control-system/frontend/src/components/MachineDetail.jsx
 import React, { useEffect, useState } from "react";
 import MachineControl from "./MachineControl";
 
-export default function MachineDetail({ machine, telemetry, backend, token }) {
+export default function MachineDetail({ machine, telemetry, backend, token, onBack }) {
   const [history, setHistory] = useState([]);
   const [conditions, setConditions] = useState([]);
   const [machineState, setMachineState] = useState(null);
@@ -68,12 +69,32 @@ export default function MachineDetail({ machine, telemetry, backend, token }) {
   };
 
   if (loading) {
-    return <div>Loading machine data...</div>;
+    return (
+      <div style={{ padding: '40px', textAlign: 'center' }}>
+        <div>Loading machine data...</div>
+      </div>
+    );
   }
 
   return (
-    <div>
-      <h2>Machine: {machine}</h2>
+    <div style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto' }}>
+      {/* Back button and header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '15px', marginBottom: '20px' }}>
+        <button 
+          onClick={onBack}
+          style={{
+            background: '#3498db',
+            color: 'white',
+            border: 'none',
+            padding: '8px 16px',
+            borderRadius: '4px',
+            cursor: 'pointer'
+          }}
+        >
+          ← Back to Dashboard
+        </button>
+        <h1 style={{ margin: 0, color: '#2c3e50' }}>Machine: {machine}</h1>
+      </div>
       
       {/* Current State & Evaluation */}
       {telemetry?.evaluation && (
@@ -138,6 +159,15 @@ export default function MachineDetail({ machine, telemetry, backend, token }) {
                 {telemetry.power}W
               </div>
             </div>
+            <div style={{ padding: 12, background: '#f3e5f5', borderRadius: 8 }}>
+              <strong>State</strong>
+              <div style={{ 
+                fontSize: '1.5em',
+                color: telemetry.state === 'running' ? '#4CAF50' : '#F44336'
+              }}>
+                {telemetry.state?.toUpperCase() || 'UNKNOWN'}
+              </div>
+            </div>
           </div>
         ) : (
           <p>No telemetry data available</p>
@@ -147,7 +177,7 @@ export default function MachineDetail({ machine, telemetry, backend, token }) {
       {/* Condition History */}
       <div style={{ marginBottom: 16 }}>
         <h4>Condition History</h4>
-        <div style={{ maxHeight: 200, overflow: 'auto' }}>
+        <div style={{ maxHeight: 200, overflow: 'auto', background: '#f8f9fa', padding: '10px', borderRadius: '4px' }}>
           {conditions.length > 0 ? (
             conditions.map((condition, i) => (
               <div key={i} style={{ 
@@ -171,7 +201,7 @@ export default function MachineDetail({ machine, telemetry, backend, token }) {
       <MachineControl 
         machineId={machine} 
         backend={backend} 
-        currentState={machineState?.currentState}
+        currentState={machineState?.currentState || telemetry?.state}
         token={token}
       />
     </div>
