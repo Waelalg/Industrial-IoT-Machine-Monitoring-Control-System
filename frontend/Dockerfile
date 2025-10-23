@@ -1,11 +1,35 @@
-FROM node:18-alpine as build
+# Build stage
+FROM node:18 AS build
+
 WORKDIR /app
-COPY package.json package-lock*.json ./
+
+# Copy package files
+COPY package.json ./
+
+# Install dependencies using npm install instead of npm ci
 RUN npm install
+
+# Copy source code
 COPY . .
+
+# Pass build-time arguments
+ARG VITE_BACKEND=http://localhost:3000
+ENV VITE_BACKEND=$VITE_BACKEND
+
+# Build the app
 RUN npm run build
 
-FROM nginx:stable-alpine
+# Production stage
+FROM nginx:alpine
+
+# Copy built app to nginx
 COPY --from=build /app/dist /usr/share/nginx/html
+
+# Copy nginx configuration
+COPY nginx.conf /etc/nginx/nginx.conf
+
+# Expose port 80
 EXPOSE 80
+
+# Start nginx
 CMD ["nginx", "-g", "daemon off;"]

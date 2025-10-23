@@ -1,16 +1,283 @@
-//industrial-iot-machine-monitoring-control-system/backend/server.js
+// industrial-iot-machine-monitoring-control-system/backend/server.js
 const express = require('express');
 const http = require('http');
 const { MongoClient } = require('mongodb');
 const mqtt = require('mqtt');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 const PORT = process.env.PORT || 3000;
 const MQTT_URL = process.env.MQTT_URL || 'mqtt://localhost:1883';
 const MONGO_URL = process.env.MONGO_URL || 'mongodb://localhost:27017/iot_iiot';
 const PLANT_ID = process.env.PLANT_ID || 'A1';
+const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production';
+
+// Machine State Definitions
+const MACHINE_STATES = {
+  IDLE: 'idle',
+  RUNNING: 'running',
+  STOPPED: 'stopped',
+  MAINTENANCE: 'maintenance',
+  ERROR: 'error'
+};
+
+// Control Logic based on sensor data
+const CONTROL_RULES = {
+  temperature: {
+    normal: [60, 85],
+    warning: [85, 95],
+    critical: 95,
+    action: {
+      warning: 'reduce_speed',
+      critical: 'emergency_stop'
+    }
+  },
+  vibration: {
+    normal: [0, 2.5],
+    warning: [2.5, 4.0],
+    critical: 4.0,
+    action: {
+      warning: 'schedule_maintenance',
+      critical: 'immediate_stop'
+    }
+  },
+  power: {
+    normal: [200, 280],
+    warning: [280, 320],
+    critical: 320,
+    action: {
+      warning: 'check_load',
+      critical: 'power_cutoff'
+    }
+  }
+};
+
+// Evaluate machine condition and determine actions
+function evaluateMachineCondition(telemetry) {
+  const actions = [];
+  const alerts = [];
+  let recommendedState = MACHINE_STATES.RUNNING;
+
+  // Temperature evaluation
+  if (telemetry.temp >= CONTROL_RULES.temperature.critical) {
+    actions.push(CONTROL_RULES.temperature.action.critical);
+    alerts.push({ type: 'CRITICAL', message: `Temperature critical: ${telemetry.temp}°C` });
+    recommendedState = MACHINE_STATES.STOPPED;
+  } else if (telemetry.temp >= CONTROL_RULES.temperature.warning[0]) {
+    actions.push(CONTROL_RULES.temperature.action.warning);
+    alerts.push({ type: 'WARNING', message: `Temperature high: ${telemetry.temp}°C` });
+  }
+
+  // Vibration evaluation
+  if (telemetry.vibration >= CONTROL_RULES.vibration.critical) {
+    actions.push(CONTROL_RULES.vibration.action.critical);
+    alerts.push({ type: 'CRITICAL', message: `Vibration critical: ${telemetry.vibration}` });
+    recommendedState = MACHINE_STATES.STOPPED;
+  } else if (telemetry.vibration >= CONTROL_RULES.vibration.warning[0]) {
+    actions.push(CONTROL_RULES.vibration.action.warning);
+    alerts.push({ type: 'WARNING', message: `Vibration high: ${telemetry.vibration}` });
+    recommendedState = MACHINE_STATES.MAINTENANCE;
+  }
+
+  // Power evaluation
+  if (telemetry.power >= CONTROL_RULES.power.critical) {
+    actions.push(CONTROL_RULES.power.action.critical);
+    alerts.push({ type: 'CRITICAL', message: `Power consumption critical: ${telemetry.power}W` });
+    recommendedState = MACHINE_STATES.STOPPED;
+  } else if (telemetry.power >= CONTROL_RULES.power.warning[0]) {
+    actions.push(CONTROL_RULES.power.action.warning);
+    alerts.push({ type: 'WARNING', message: `Power consumption high: ${telemetry.power}W` });
+  }
+
+  return {
+    actions,
+    alerts,
+    recommendedState,
+    overallStatus: recommendedState === MACHINE_STATES.RUNNING ? 'HEALTHY' : 'ISSUE_DETECTED'
+  };
+}
+
+class MachineController {
+  constructor(mqttClient, db) {
+    this.mqttClient = mqttClient;
+    this.db = db;
+    this.machineStates = new Map(); // In-memory state tracking
+  }
+
+  // Process telemetry and take automatic actions
+  async processTelemetry(telemetryData) {
+    const { machineId, plantId, temp, vibration, power } = telemetryData;
+    
+    // Evaluate condition
+    const evaluation = evaluateMachineCondition({ temp, vibration, power });
+    
+    // Store evaluation results
+    await this.db.collection('machine_conditions').insertOne({
+      machineId,
+      plantId,
+      timestamp: new Date(),
+      telemetry: { temp, vibration, power },
+      evaluation,
+      autoActionTaken: false
+    });
+
+    // Take automatic actions for critical conditions
+    if (evaluation.recommendedState === MACHINE_STATES.STOPPED) {
+      await this.emergencyStop(machineId, plantId, evaluation.alerts);
+    } else if (evaluation.recommendedState === MACHINE_STATES.MAINTENANCE) {
+      await this.scheduleMaintenance(machineId, plantId, evaluation.alerts);
+    }
+
+    // Update current state
+    this.machineStates.set(machineId, {
+      currentState: evaluation.recommendedState,
+      lastEvaluation: evaluation,
+      lastUpdate: new Date()
+    });
+
+    return evaluation;
+  }
+
+  async emergencyStop(machineId, plantId, alerts) {
+    const reqId = `emergency-${Date.now()}`;
+    
+    // Send stop command
+    const topic = `factory/${plantId}/machine/${machineId}/control`;
+    this.mqttClient.publish(topic, JSON.stringify({
+      reqId,
+      cmd: 'emergency_stop',
+      reason: 'Automatic safety shutdown',
+      alerts
+    }));
+
+    // Log the action
+    await this.db.collection('auto_actions').insertOne({
+      machineId,
+      plantId,
+      action: 'emergency_stop',
+      reason: 'Critical condition detected',
+      alerts,
+      timestamp: new Date(),
+      reqId
+    });
+
+    console.log(`Emergency stop initiated for ${machineId}`);
+  }
+
+  async scheduleMaintenance(machineId, plantId, alerts) {
+    // Create maintenance ticket
+    await this.db.collection('maintenance_tickets').insertOne({
+      machineId,
+      plantId,
+      type: 'preventive',
+      reason: 'High vibration detected',
+      priority: 'medium',
+      status: 'pending',
+      created: new Date(),
+      alerts
+    });
+
+    console.log(`Maintenance scheduled for ${machineId}`);
+  }
+
+  // Manual control with safety checks
+  async manualControl(machineId, plantId, command, operator, userRole) {
+    const currentState = this.machineStates.get(machineId);
+    
+    // Role-based access control for commands
+    if (userRole === 'viewer') {
+      throw new Error('Insufficient permissions. Viewers cannot control machines.');
+    }
+
+    if (command === 'emergency_stop' && userRole !== 'admin' && userRole !== 'operator') {
+      throw new Error('Only admins and operators can execute emergency stops.');
+    }
+
+    // Safety checks
+    if (command === 'start' && currentState?.evaluation?.overallStatus === 'ISSUE_DETECTED') {
+      throw new Error('Cannot start machine with detected issues. Please check alerts.');
+    }
+
+    if (command === 'stop' && currentState?.currentState === MACHINE_STATES.STOPPED) {
+      throw new Error('Machine is already stopped');
+    }
+
+    // Execute command
+    const reqId = `manual-${Date.now()}`;
+    const topic = `factory/${plantId}/machine/${machineId}/control`;
+    
+    this.mqttClient.publish(topic, JSON.stringify({
+      reqId,
+      cmd: command,
+      operator,
+      userRole,
+      timestamp: new Date()
+    }));
+
+    // Log manual command
+    await this.db.collection('manual_commands').insertOne({
+      machineId,
+      plantId,
+      command,
+      operator,
+      userRole,
+      reqId,
+      timestamp: new Date(),
+      currentState: currentState?.currentState
+    });
+
+    return { reqId, message: `Command ${command} sent to ${machineId}` };
+  }
+
+  getMachineState(machineId) {
+    return this.machineStates.get(machineId) || { currentState: MACHINE_STATES.IDLE };
+  }
+}
+
+// Authentication middleware
+const authenticate = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+
+  if (!token) {
+    return res.status(401).json({ error: 'Access token required' });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ error: 'Invalid or expired token' });
+    }
+    req.user = user;
+    next();
+  });
+};
+
+// Role-based authorization middleware
+function authorize(roles = []) {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+    next();
+  };
+}
+
+// Rate limiting
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP, please try again later.'
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // limit each IP to 5 login attempts per windowMs
+  message: 'Too many authentication attempts, please try again later.'
+});
 
 async function start() {
   // Connect to MongoDB
@@ -21,16 +288,61 @@ async function start() {
   const machinesCol = db.collection('machines');
   const commandsCol = db.collection('commands');
   const alertsCol = db.collection('alerts');
+  const usersCol = db.collection('users');
+
+  // Initialize default admin user if not exists
+  const adminExists = await usersCol.findOne({ username: 'admin' });
+  if (!adminExists) {
+    const hashedPassword = await bcrypt.hash('admin123', 10);
+    await usersCol.insertOne({
+      username: 'admin',
+      password: hashedPassword,
+      role: 'admin',
+      name: 'System Administrator',
+      created: new Date()
+    });
+    console.log('Default admin user created: admin / admin123');
+  }
+
+  // Initialize default machines if not exists
+  const defaultMachines = [
+    { machineId: 'MX-101', name: 'Hydraulic Press', type: 'press', location: 'Line A' },
+    { machineId: 'MX-102', name: 'CNC Mill', type: 'mill', location: 'Line B' },
+    { machineId: 'MX-103', name: 'Assembly Robot', type: 'robot', location: 'Line C' }
+  ];
+
+  for (const machine of defaultMachines) {
+    const exists = await machinesCol.findOne({ machineId: machine.machineId });
+    if (!exists) {
+      await machinesCol.insertOne(machine);
+    }
+  }
 
   // Express + Socket.IO
   const app = express();
   app.use(cors());
   app.use(express.json());
-  const server = http.createServer(app);
-  const io = new Server(server, { cors: { origin: '*' } });
+  
+  // Apply rate limiting to API routes
+  app.use('/api/', apiLimiter);
+  app.use('/auth/login', authLimiter);
 
-  // MQTT client
-  const mqttClient = mqtt.connect(MQTT_URL);
+  const server = http.createServer(app);
+  const io = new Server(server, { 
+    cors: { 
+      origin: process.env.FRONTEND_URL || "http://localhost:8080",
+      methods: ["GET", "POST"]
+    } 
+  });
+
+  // MQTT client with enhanced error handling
+  const mqttClient = mqtt.connect(MQTT_URL, {
+    reconnectPeriod: 1000,
+    connectTimeout: 30 * 1000
+  });
+
+  // Initialize Machine Controller
+  const machineController = new MachineController(mqttClient, db);
 
   mqttClient.on('connect', () => {
     console.log('MQTT connected to', MQTT_URL);
@@ -39,11 +351,14 @@ async function start() {
     mqttClient.subscribe(`factory/+/machine/+/status`);
   });
 
+  mqttClient.on('error', (err) => {
+    console.error('MQTT connection error:', err);
+  });
+
   mqttClient.on('message', async (topic, payload) => {
     try {
       const msg = JSON.parse(payload.toString());
       const parts = topic.split('/');
-      // expected: ["factory", "<plant>", "machine", "<machineId>", "<kind>"]
       const plant = parts[1];
       const machineId = parts[3];
       const kind = parts[4];
@@ -58,22 +373,53 @@ async function start() {
           power: msg.power,
           raw: msg
         };
+        
         await telemetryCol.insertOne(doc);
-        io.emit('telemetry', doc);
+        
+        // Enhanced: Process telemetry with control logic
+        const evaluation = await machineController.processTelemetry(doc);
+        
+        io.emit('telemetry', { ...doc, evaluation });
+        
+        // Emit evaluation results
+        io.emit('machine_evaluation', {
+          machineId,
+          evaluation,
+          timestamp: new Date()
+        });
 
-        // simple alert rule example (threshold 85)
+        // Simple alert rule example (threshold 85)
         const threshold = 85;
         if (doc.temp && doc.temp > threshold) {
-          const alert = { machineId, plantId: plant, ts: new Date(), type: 'over_temp', value: doc.temp, threshold, acknowledged: false };
+          const alert = { 
+            machineId, 
+            plantId: plant, 
+            ts: new Date(), 
+            type: 'over_temp', 
+            value: doc.temp, 
+            threshold, 
+            acknowledged: false 
+          };
           await alertsCol.insertOne(alert);
           io.emit('alert', alert);
         }
       } else if (kind === 'control' && parts[5] === 'ack') {
         // topic: factory/<plant>/machine/<id>/control/ack
         const { reqId, status } = msg;
-        await commandsCol.updateOne({ reqId }, { $set: { status, tsAck: new Date() } });
+        await commandsCol.updateOne({ reqId }, { 
+          $set: { 
+            status, 
+            tsAck: new Date(),
+            acknowledgedBy: 'machine'
+          } 
+        });
         io.emit('commandAck', { reqId, machineId, status });
       } else if (kind === 'status') {
+        // Update machine state from device
+        machineController.machineStates.set(machineId, {
+          currentState: msg.status,
+          lastUpdate: new Date()
+        });
         io.emit('status', { machineId, status: msg.status, ts: new Date() });
       }
     } catch (err) {
@@ -81,13 +427,88 @@ async function start() {
     }
   });
 
-  // REST endpoints
+  // Authentication endpoints
+  app.post('/auth/login', async (req, res) => {
+    try {
+      const { username, password } = req.body;
+      
+      if (!username || !password) {
+        return res.status(400).json({ error: 'Username and password required' });
+      }
+
+      const user = await usersCol.findOne({ username });
+      if (!user) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+
+      const validPassword = await bcrypt.compare(password, user.password);
+      if (!validPassword) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+
+      const token = jwt.sign(
+        { 
+          userId: user._id, 
+          username: user.username, 
+          role: user.role,
+          name: user.name 
+        }, 
+        JWT_SECRET, 
+        { expiresIn: '24h' }
+      );
+
+      res.json({
+        token,
+        user: {
+          id: user._id,
+          username: user.username,
+          role: user.role,
+          name: user.name
+        }
+      });
+    } catch (error) {
+      console.error('Login error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  app.post('/auth/register', async (req, res) => {
+    try {
+      const { username, password, name, role = 'viewer' } = req.body;
+      
+      // Check if user exists
+      const existingUser = await usersCol.findOne({ username });
+      if (existingUser) {
+        return res.status(400).json({ error: 'Username already exists' });
+      }
+
+      // Hash password and create user
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const result = await usersCol.insertOne({
+        username,
+        password: hashedPassword,
+        name,
+        role,
+        created: new Date()
+      });
+
+      res.json({ 
+        message: 'User created successfully',
+        userId: result.insertedId 
+      });
+    } catch (error) {
+      console.error('Registration error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  // Protected REST endpoints
   app.get('/api/machines', async (req, res) => {
     const machines = await machinesCol.find().toArray();
     res.json(machines);
   });
 
-  app.post('/api/machines', async (req, res) => {
+  app.post('/api/machines', authorize(['admin']), async (req, res) => {
     const doc = req.body;
     await machinesCol.insertOne(doc);
     res.json({ ok: true });
@@ -105,23 +526,84 @@ async function start() {
     res.json(data);
   });
 
+  // Enhanced machine state endpoints
+  app.get('/api/machines/:id/state', async (req, res) => {
+    const { id } = req.params;
+    const state = machineController.getMachineState(id);
+    res.json(state);
+  });
+
+  app.get('/api/machines/:id/conditions', async (req, res) => {
+    const { id } = req.params;
+    const limit = parseInt(req.query.limit || '50', 10);
+    const data = await db.collection('machine_conditions')
+      .find({ machineId: id })
+      .sort({ timestamp: -1 })
+      .limit(limit)
+      .toArray();
+    res.json(data);
+  });
+
   app.post('/api/machines/:id/commands', async (req, res) => {
     const { id } = req.params;
     const { cmd, params = {}, issuedBy = 'operator' } = req.body;
-    const reqId = `${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
-    const doc = { machineId: id, cmd, params, issuedBy, reqId, status: 'pending', tsIssued: new Date() };
-    await commandsCol.insertOne(doc);
-    const topic = `factory/${PLANT_ID}/machine/${id}/control`;
-    mqttClient.publish(topic, JSON.stringify({ reqId, cmd, params }));
-    res.json({ ok: true, reqId });
+    
+    try {
+      const result = await machineController.manualControl(
+        id, 
+        PLANT_ID, 
+        cmd, 
+        issuedBy || req.user.username,
+        req.user.role
+      );
+      res.json({ ok: true, ...result });
+    } catch (error) {
+      res.status(400).json({ ok: false, error: error.message });
+    }
+  });
+
+  // User management endpoints (admin only)
+  app.get('/api/users', authorize(['admin']), async (req, res) => {
+    const users = await usersCol.find({}, { projection: { password: 0 } }).toArray();
+    res.json(users);
+  });
+
+  app.get('/api/profile', async (req, res) => {
+    const user = await usersCol.findOne(
+      { username: req.user.username }, 
+      { projection: { password: 0 } }
+    );
+    res.json(user);
+  });
+
+  // Socket.IO authentication middleware
+  io.use((socket, next) => {
+    const token = socket.handshake.auth.token;
+    if (!token) {
+      return next(new Error('Authentication error'));
+    }
+
+    jwt.verify(token, JWT_SECRET, (err, decoded) => {
+      if (err) {
+        return next(new Error('Authentication error'));
+      }
+      socket.user = decoded;
+      next();
+    });
   });
 
   io.on('connection', (socket) => {
-    console.log('Socket.IO connected', socket.id);
+    console.log('Socket.IO connected', socket.id, 'user:', socket.user.username);
+    
+    socket.on('disconnect', () => {
+      console.log('Socket.IO disconnected', socket.id);
+    });
   });
 
   server.listen(PORT, () => {
     console.log(`Backend listening on ${PORT}`);
+    console.log(`Plant ID: ${PLANT_ID}`);
+    console.log(`Default admin: admin / admin123`);
   });
 }
 
