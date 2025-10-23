@@ -1,0 +1,7 @@
+{
+  "name": "iiot-simulator",
+  "version": "1.0.0",
+  "main": "sim.js",
+  "scripts": { "start":"node sim.js" },
+  "dependencies": { "mqtt":"^4.3.7", "dotenv":"^16.0.0" }
+}

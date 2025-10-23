@@ -1,0 +1,50 @@
+version: "3.8"
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - mosqdata:/mosquitto/data
+
+  mongo:
+    image: mongo:6
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodata:/data/db
+
+  backend:
+    build: ./backend
+    ports:
+      - "3000:3000"
+    environment:
+      - MQTT_URL=mqtt://mosquitto:1883
+      - MONGO_URL=mongodb://mongo:27017/iot_iiot
+      - PLANT_ID=A1
+    depends_on:
+      - mosquitto
+      - mongo
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    environment:
+      - VITE_BACKEND=http://localhost:3000
+    depends_on:
+      - backend
+
+  simulator:
+    build: ./simulator
+    environment:
+      - MQTT_URL=mqtt://mosquitto:1883
+      - PLANT_ID=A1
+    depends_on:
+      - mosquitto
+
+volumes:
+  mosqdata:
+  mongodata:
