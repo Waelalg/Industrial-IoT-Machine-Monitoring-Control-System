@@ -1,4 +1,7 @@
-# 🏭 Smart Factory 4.0 — Industrial IoT Monitoring & Control System
+# 🏭 Smart Factory — Industrial IoT Monitoring & Control System
+
+<img width="1889" height="887" alt="Screenshot 2025-10-23 185331" src="https://github.com/user-attachments/assets/1ce28cc0-2f3a-485c-966e-292ce156daf0" />
+
 
 ![Industry-4.0](https://img.shields.io/badge/Industry-4.0-blue) ![IoT-Industrial](https://img.shields.io/badge/IoT-Industrial-green) ![Real-time-Monitoring](https://img.shields.io/badge/Real--time-Monitoring-orange) ![Deployment-Docker](https://img.shields.io/badge/Deployment-Docker-lightblue)
 
@@ -77,6 +80,9 @@ cd simulator && npm install && npm start
 * Pre-configured set of simulated industrial machines (CNC, robots, conveyors, etc.)
 * Realistic telemetry patterns and automated safety rules
 * Factory layout visualization and production-line representation
+
+<img width="1919" height="912" alt="Screenshot 2025-10-23 185322" src="https://github.com/user-attachments/assets/62284af3-89d3-4af8-a3db-342ff5eafe52" />
+
 
 ---
 
