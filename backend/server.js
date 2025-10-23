@@ -105,7 +105,25 @@ class MachineController {
   constructor(mqttClient, db) {
     this.mqttClient = mqttClient;
     this.db = db;
-    this.machineStates = new Map(); // In-memory state tracking
+    this.machineStates = new Map();
+  }
+
+  // Initialize machine states from database
+  async initializeMachineStates() {
+    try {
+      const machines = await this.db.collection('machines').find().toArray();
+      machines.forEach(machine => {
+        this.machineStates.set(machine.machineId, {
+          currentState: machine.status || 'idle',
+          lastUpdate: new Date(),
+          lastEvaluation: null,
+          machineData: machine
+        });
+      });
+      console.log(`Initialized ${machines.length} machine states`);
+    } catch (error) {
+      console.error('Error initializing machine states:', error);
+    }
   }
 
   // Process telemetry and take automatic actions
@@ -126,18 +144,25 @@ class MachineController {
     });
 
     // Take automatic actions for critical conditions
+    let stateChanged = false;
     if (evaluation.recommendedState === MACHINE_STATES.STOPPED) {
       await this.emergencyStop(machineId, plantId, evaluation.alerts);
+      stateChanged = true;
     } else if (evaluation.recommendedState === MACHINE_STATES.MAINTENANCE) {
       await this.scheduleMaintenance(machineId, plantId, evaluation.alerts);
+      stateChanged = true;
     }
 
     // Update current state
-    this.machineStates.set(machineId, {
-      currentState: evaluation.recommendedState,
-      lastEvaluation: evaluation,
-      lastUpdate: new Date()
-    });
+    const currentState = this.machineStates.get(machineId);
+    if (currentState) {
+      this.machineStates.set(machineId, {
+        ...currentState,
+        lastEvaluation: evaluation,
+        lastUpdate: new Date(),
+        currentState: stateChanged ? evaluation.recommendedState : currentState.currentState
+      });
+    }
 
     return evaluation;
   }
@@ -153,6 +178,16 @@ class MachineController {
       reason: 'Automatic safety shutdown',
       alerts
     }));
+
+    // Update state immediately
+    const currentState = this.machineStates.get(machineId);
+    if (currentState) {
+      this.machineStates.set(machineId, {
+        ...currentState,
+        currentState: MACHINE_STATES.STOPPED,
+        lastUpdate: new Date()
+      });
+    }
 
     // Log the action
     await this.db.collection('auto_actions').insertOne({
@@ -186,13 +221,15 @@ class MachineController {
 
   // Manual control with safety checks
   async manualControl(machineId, plantId, command, operator, userRole) {
-    // Add validation for userRole
     if (!userRole) {
       throw new Error('User role is required for machine control');
     }
 
     const currentState = this.machineStates.get(machineId);
-    
+    if (!currentState) {
+      throw new Error(`Machine ${machineId} not found`);
+    }
+
     // Role-based access control for commands
     if (userRole === 'viewer') {
       throw new Error('Insufficient permissions. Viewers cannot control machines.');
@@ -203,13 +240,36 @@ class MachineController {
     }
 
     // Safety checks
-    if (command === 'start' && currentState?.evaluation?.overallStatus === 'ISSUE_DETECTED') {
+    if (command === 'start' && currentState.lastEvaluation?.overallStatus === 'ISSUE_DETECTED') {
       throw new Error('Cannot start machine with detected issues. Please check alerts.');
     }
 
-    if (command === 'stop' && currentState?.currentState === MACHINE_STATES.STOPPED) {
+    if (command === 'stop' && currentState.currentState === MACHINE_STATES.STOPPED) {
       throw new Error('Machine is already stopped');
     }
+
+    // Update state immediately for better UX
+    let newState = currentState.currentState;
+    switch (command) {
+      case 'start':
+        newState = MACHINE_STATES.RUNNING;
+        break;
+      case 'stop':
+        newState = MACHINE_STATES.STOPPED;
+        break;
+      case 'maintenance_mode':
+        newState = MACHINE_STATES.MAINTENANCE;
+        break;
+      case 'emergency_stop':
+        newState = MACHINE_STATES.STOPPED;
+        break;
+    }
+
+    this.machineStates.set(machineId, {
+      ...currentState,
+      currentState: newState,
+      lastUpdate: new Date()
+    });
 
     // Execute command
     const reqId = `manual-${Date.now()}`;
@@ -232,14 +292,34 @@ class MachineController {
       userRole,
       reqId,
       timestamp: new Date(),
-      currentState: currentState?.currentState
+      previousState: currentState.currentState,
+      newState: newState
     });
 
-    return { reqId, message: `Command ${command} sent to ${machineId}` };
+    console.log(`Command ${command} sent to ${machineId}, state updated to ${newState}`);
+
+    return { 
+      reqId, 
+      message: `Command ${command} sent to ${machineId}`,
+      newState: newState 
+    };
   }
 
   getMachineState(machineId) {
-    return this.machineStates.get(machineId) || { currentState: MACHINE_STATES.IDLE };
+    const state = this.machineStates.get(machineId);
+    return state || { 
+      currentState: MACHINE_STATES.IDLE,
+      lastUpdate: new Date(),
+      machineData: { machineId, name: 'Unknown Machine' }
+    };
+  }
+
+  getAllMachineStates() {
+    const states = {};
+    this.machineStates.forEach((state, machineId) => {
+      states[machineId] = state;
+    });
+    return states;
   }
 }
 
@@ -328,15 +408,29 @@ async function start() {
 
   // Initialize default machines if not exists
   const defaultMachines = [
-    { machineId: 'MX-101', name: 'Hydraulic Press', type: 'press', location: 'Line A' },
-    { machineId: 'MX-102', name: 'CNC Mill', type: 'mill', location: 'Line B' },
-    { machineId: 'MX-103', name: 'Assembly Robot', type: 'robot', location: 'Line C' }
+    { machineId: 'CNC-001', name: '5-Axis CNC Mill', type: 'cnc', location: 'Machining Cell A', status: 'idle' },
+    { machineId: 'CNC-002', name: 'CNC Lathe', type: 'cnc', location: 'Machining Cell B', status: 'idle' },
+    { machineId: 'IM-001', name: 'Injection Molder 200T', type: 'injection', location: 'Molding Line 1', status: 'idle' },
+    { machineId: 'IM-002', name: 'Injection Molder 500T', type: 'injection', location: 'Molding Line 2', status: 'idle' },
+    { machineId: 'ROB-001', name: '6-Axis Assembly Robot', type: 'robot', location: 'Assembly Station 1', status: 'idle' },
+    { machineId: 'ROB-002', name: 'SCARA Robot', type: 'robot', location: 'Assembly Station 2', status: 'idle' },
+    { machineId: 'CV-001', name: 'Main Conveyor Line', type: 'conveyor', location: 'Production Line', status: 'idle' },
+    { machineId: 'CV-002', name: 'Packaging Conveyor', type: 'conveyor', location: 'Packaging Area', status: 'idle' },
+    { machineId: 'QC-001', name: 'Vision Inspection System', type: 'quality', location: 'Final Inspection', status: 'idle' },
+    { machineId: 'QC-002', name: 'Laser Measurement', type: 'quality', location: 'Quality Lab', status: 'idle' }
   ];
 
+  // Remove old machines if they exist
+  await machinesCol.deleteMany({ 
+    machineId: { $in: ['MX-101', 'MX-102', 'MX-103'] } 
+  });
+
+  // Insert new machines
   for (const machine of defaultMachines) {
     const exists = await machinesCol.findOne({ machineId: machine.machineId });
     if (!exists) {
       await machinesCol.insertOne(machine);
+      console.log(`Created machine: ${machine.machineId}`);
     }
   }
 
@@ -365,12 +459,14 @@ async function start() {
 
   // Initialize Machine Controller
   const machineController = new MachineController(mqttClient, db);
+  await machineController.initializeMachineStates();
 
   mqttClient.on('connect', () => {
     console.log('MQTT connected to', MQTT_URL);
     mqttClient.subscribe(`factory/+/machine/+/telemetry`);
     mqttClient.subscribe(`factory/+/machine/+/control/ack`);
     mqttClient.subscribe(`factory/+/machine/+/status`);
+    console.log('Subscribed to MQTT topics');
   });
 
   mqttClient.on('error', (err) => {
@@ -385,7 +481,11 @@ async function start() {
       const machineId = parts[3];
       const kind = parts[4];
 
+      console.log(`MQTT message received: ${topic}`);
+
       if (kind === 'telemetry') {
+        console.log(`Telemetry from ${machineId}:`, msg);
+        
         const doc = {
           machineId,
           plantId: plant,
@@ -438,11 +538,34 @@ async function start() {
         io.emit('commandAck', { reqId, machineId, status });
       } else if (kind === 'status') {
         // Update machine state from device
+        const newState = msg.status;
+        console.log(`Updating machine ${machineId} state to: ${newState}`);
+        
         machineController.machineStates.set(machineId, {
-          currentState: msg.status,
-          lastUpdate: new Date()
+          currentState: newState,
+          lastUpdate: new Date(),
+          statusMessage: msg.message || 'State updated'
         });
-        io.emit('status', { machineId, status: msg.status, ts: new Date() });
+
+        // Also update in database
+        await machinesCol.updateOne(
+          { machineId: machineId },
+          { $set: { status: newState, lastStatusUpdate: new Date() } }
+        );
+
+        io.emit('status', { 
+          machineId, 
+          status: newState, 
+          message: msg.message,
+          ts: new Date() 
+        });
+
+        // Also emit a general update for the dashboard
+        io.emit('machine_state_update', {
+          machineId,
+          state: newState,
+          timestamp: new Date()
+        });
       }
     } catch (err) {
       console.error('Error handling MQTT message', err);
@@ -675,6 +798,10 @@ async function start() {
 
   io.on('connection', (socket) => {
     console.log('Socket.IO connected', socket.id, 'user:', socket.user.username);
+    
+    // Send current machine states to newly connected client
+    const machineStates = machineController.getAllMachineStates();
+    socket.emit('initial_states', machineStates);
     
     socket.on('disconnect', () => {
       console.log('Socket.IO disconnected', socket.id);
